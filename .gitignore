@@ -1,0 +1,10 @@
+.vscode
+data/
+docs/
+tests/
+scripts/
+.env.example
+
+
+
+
