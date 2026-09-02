@@ -93,3 +93,21 @@ class SiliconFlowClient:
             },
         )
         return response["choices"][0]["message"]["content"]
+
+    def chat(self, message: str) -> str:
+        """Use the existing Qwen client for a non-RAG conversational response."""
+        response = self._post(
+            "/chat/completions",
+            {
+                "model": self.llm_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是医学影像智能问答助手，可以进行简短、友好的普通聊天。",
+                    },
+                    {"role": "user", "content": message},
+                ],
+                "temperature": 0.2,
+            },
+        )
+        return response["choices"][0]["message"]["content"]

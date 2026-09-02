@@ -1,1 +1,1 @@
-"""Agent layer placeholder."""
+"""LangGraph agent layer."""
