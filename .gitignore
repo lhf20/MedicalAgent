@@ -3,7 +3,9 @@ data/
 docs/
 tests/
 scripts/
-.env.example
+.env
+app/rag/__pycache__/
+app/__pycache__
 
 
 

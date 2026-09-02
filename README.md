@@ -4,7 +4,8 @@
 
 ## 当前阶段
 
-当前完成最小 RAG Demo：从 `data/knowledge/` 加载 Markdown 文档、按段落优先切分、通过 SiliconFlow 的 `BAAI/bge-m3` 创建向量，并以余弦相似度进行本地 Top-K 检索。检索结果会作为上下文发送给已配置的 Qwen 模型。
+当前完成两阶段 RAG Demo：从 `data/knowledge/` 加载 Markdown 文档、按段落优先切分、通过 SiliconFlow 的 `BAAI/bge-m3` 创建向量并以余弦相似度召回 Top-10，再用 `BAAI/bge-reranker-v2-m3` 重排序并保留 Top-3。最终片段会作为上下文发送给已配置的 Qwen 模型。
+模型的配置在.env文件里进行修改。
 
 ## 运行
 

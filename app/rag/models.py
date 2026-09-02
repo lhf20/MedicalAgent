@@ -18,3 +18,11 @@ class SearchResult:
 
     chunk: TextChunk
     score: float
+
+
+@dataclass(frozen=True)
+class RerankResult:
+    """A vector-retrieval candidate scored by a cross-encoder reranker."""
+
+    result: SearchResult
+    score: float

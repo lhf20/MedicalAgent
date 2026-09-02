@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 
 
 def _read_dotenv(project_dir: str) -> None:
@@ -34,6 +35,7 @@ class SiliconFlowClient:
         self.base_url = os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
         self.llm_model = os.getenv("LLM_MODEL", "")
         self.embedding_model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        self.reranker_model = DEFAULT_RERANKER_MODEL
         if not self.api_key:
             raise RuntimeError("LLM_API_KEY is missing. Configure it in your existing .env file.")
         if not self.llm_model:
@@ -58,6 +60,19 @@ class SiliconFlowClient:
     def embed(self, texts: list[str]) -> list[list[float]]:
         response = self._post("/embeddings", {"model": self.embedding_model, "input": texts})
         return [item["embedding"] for item in sorted(response["data"], key=lambda item: item["index"])]
+
+    def rerank(self, query: str, documents: list[str], top_n: int) -> dict[str, Any]:
+        """Rerank text candidates using the existing SiliconFlow credentials."""
+        return self._post(
+            "/rerank",
+            {
+                "model": self.reranker_model,
+                "query": query,
+                "documents": documents,
+                "top_n": top_n,
+                "return_documents": False,
+            },
+        )
 
     def answer(self, question: str, context: str) -> str:
         system_prompt = (
