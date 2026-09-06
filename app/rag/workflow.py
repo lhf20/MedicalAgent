@@ -23,6 +23,14 @@ class RAGResponse:
     answer: str
 
 
+@dataclass(frozen=True)
+class RAGRetrieval:
+    """The final reranked context, without an LLM answer."""
+
+    context: str
+    chunk_count: int
+
+
 class MedicalRAGWorkflow:
     """Uses the existing embedding, vector search, rerank, and Qwen components."""
 
@@ -46,12 +54,12 @@ class MedicalRAGWorkflow:
         vector_store = LocalVectorStore(chunks, client.embed([chunk.content for chunk in chunks]))
         return cls(client=client, vector_store=vector_store, reranker=SiliconFlowReranker(client))
 
-    def answer(self, query: str) -> RAGResponse:
-        """Run the verified Top-10 vector recall -> rerank -> Top-3 RAG flow."""
+    def retrieve(self, query: str) -> RAGRetrieval:
+        """Run the verified Top-10 vector recall -> rerank -> Top-3 retrieval flow."""
         recalled_results = self.vector_store.search(self.client.embed([query])[0], top_k=RECALL_TOP_K)
         logger.info("初始向量召回：%d 个 chunk（请求 Top-%d）", len(recalled_results), RECALL_TOP_K)
         if not recalled_results:
-            return RAGResponse(context="", answer="未检索到相关医学知识片段，无法生成基于知识库的回答。")
+            return RAGRetrieval(context="", chunk_count=0)
 
         try:
             reranked_results = self.reranker.rerank(query, recalled_results, top_k=RECALL_TOP_K)
@@ -72,4 +80,11 @@ class MedicalRAGWorkflow:
         context = "\n\n".join(
             f"[来源：{item.chunk.source}]\n{item.chunk.content}" for item in final_results
         )
-        return RAGResponse(context=context, answer=self.client.answer(query, context))
+        return RAGRetrieval(context=context, chunk_count=len(final_results))
+
+    def answer(self, query: str) -> RAGResponse:
+        """Generate an answer from the existing retrieval flow."""
+        retrieval = self.retrieve(query)
+        if not retrieval.context:
+            return RAGResponse(context="", answer="未检索到相关医学知识片段，无法生成基于知识库的回答。")
+        return RAGResponse(context=retrieval.context, answer=self.client.answer(query, retrieval.context))

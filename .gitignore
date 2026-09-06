@@ -4,8 +4,9 @@ docs/
 tests/
 scripts/
 .env
-app/rag/__pycache__/
-app/__pycache__
+*/__pycache__/
+*/*/__pycache__/
+requirements.txt
 
 
 

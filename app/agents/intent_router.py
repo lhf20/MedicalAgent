@@ -1,5 +1,7 @@
 """Deterministic, dependency-free intent routing for the first agent version."""
 
+import re
+
 from app.agents.state import Intent
 
 
@@ -12,11 +14,23 @@ GENERAL_CHAT_KEYWORDS = (
 )
 
 
+def _is_petct_result_request(query: str) -> bool:
+    """Identify requests for a specific PET-CT study, not general medical knowledge."""
+    has_demo_study_id = bool(re.search(r"petct-demo-\d+", query))
+    has_petct_result_request = (
+        ("pet-ct" in query or "petct" in query)
+        and any(keyword in query for keyword in ("查询", "查一下", "查看", "获取", "显示"))
+    )
+    return has_demo_study_id or has_petct_result_request
+
+
 def classify_intent(query: str) -> Intent:
     """Classify the supported MVP intents without another LLM/API call."""
     normalized = query.strip().lower()
     if not normalized:
         return "unsupported"
+    if _is_petct_result_request(normalized):
+        return "petct_result_query"
     if any(keyword in normalized for keyword in MEDICAL_KEYWORDS):
         return "medical_qa"
     if any(keyword in normalized for keyword in GENERAL_CHAT_KEYWORDS):

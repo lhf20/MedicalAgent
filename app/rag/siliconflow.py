@@ -111,3 +111,99 @@ class SiliconFlowClient:
             },
         )
         return response["choices"][0]["message"]["content"]
+
+    def extract_petct_parameters(self, query: str) -> dict[str, str | None]:
+        """Use Qwen JSON output to extract only explicitly stated PET-CT Tool parameters."""
+        response = self._post(
+            "/chat/completions",
+            {
+                "model": self.llm_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "从用户的 PET-CT 查询中提取参数。只返回 JSON 对象，键必须为 "
+                            "study_id、location、lesion_id。未在问题中明确提供的值必须为 null，绝不猜测。"
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            },
+        )
+        content = response["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise RuntimeError("PET-CT parameter extraction returned non-text content")
+        try:
+            parameters = json.loads(content)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("PET-CT parameter extraction did not return valid JSON") from error
+        if not isinstance(parameters, dict):
+            raise RuntimeError("PET-CT parameter extraction did not return an object")
+        return {
+            field: parameters.get(field)
+            if isinstance(parameters.get(field), str) or parameters.get(field) is None
+            else None
+            for field in ("study_id", "location", "lesion_id")
+        }
+
+    def answer_petct_result(self, query: str, tool_result: dict[str, Any]) -> str:
+        """Answer exclusively from a successful structured PET-CT Tool result."""
+        response = self._post(
+            "/chat/completions",
+            {
+                "model": self.llm_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是医学影像助手。仅依据给定的 PET-CT Tool JSON 结果回答。"
+                            "不得补充、推测或改写任何未出现的 SUV、体积、位置或病灶数据；"
+                            "请说明结果仅供演示和学习参考。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"用户问题：{query}\n\nPET-CT Tool JSON：{json.dumps(tool_result, ensure_ascii=False)}",
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+        return response["choices"][0]["message"]["content"]
+
+    def answer_petct_with_rag(
+        self,
+        query: str,
+        tool_result: dict[str, Any],
+        rag_context: str,
+    ) -> str:
+        """Answer using distinct PET-CT facts and general RAG medical knowledge."""
+        response = self._post(
+            "/chat/completions",
+            {
+                "model": self.llm_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是医学影像助手。必须严格区分两类输入：Tool Result 是当前检查的具体事实；"
+                            "RAG Context 是一般医学知识。具体 SUV、体积、位置、病灶数量只能来自 Tool Result，"
+                            "不得猜测或补充。若 Tool Result 的 found 为 false，必须明确没有查到具体检查数据；"
+                            "若 RAG Context 为空，必须明确知识库没有足够解释依据。回答仅供演示和学习参考。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"用户问题：{query}\n\n"
+                            f"Tool Result（当前检查/病灶事实）：{json.dumps(tool_result, ensure_ascii=False)}\n\n"
+                            f"RAG Context（一般医学知识）：{rag_context or '无足够相关知识片段'}"
+                        ),
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+        return response["choices"][0]["message"]["content"]
