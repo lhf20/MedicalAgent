@@ -58,9 +58,10 @@ class MedicalImagingAgent:
             self._route_by_intent,
             {
                 "medical_qa": "medical_qa",
-                "petct_result_query": "petct_result_query",
+                "petct_query": "petct_result_query",
                 "general_chat": "general_chat",
                 "unsupported": "unsupported",
+                "clarify": "clarification",
             },
         )
         graph.add_edge("medical_qa", "save_context")
@@ -79,7 +80,7 @@ class MedicalImagingAgent:
 
     def _context_resolver_node(self, state: AgentState) -> dict[str, Any]:
         resolution = resolve_query(state["user_query"], state)
-        logger.info("上下文补全：clarification_needed=%s", bool(resolution.clarification))
+        logger.info("context_resolution: clarification_needed=%s", bool(resolution.clarification))
         return {
             "resolved_query": resolution.query,
             "clarification_needed": bool(resolution.clarification),
@@ -92,12 +93,19 @@ class MedicalImagingAgent:
 
     def _intent_router_node(self, state: AgentState) -> dict[str, Intent]:
         query = state["resolved_query"]
-        intent = classify_intent(query)
+        intent = classify_intent(
+            query,
+            conversation_history=state["conversation_history"],
+            llm_classifier=self.llm_client.chat,
+        )
         logger.info("当前 query：%s", state["user_query"])
         if query != state["user_query"]:
             logger.info("上下文补全后的 query：%s", query)
         logger.info("识别 intent：%s", intent)
-        return {"intent": intent}
+        updates: dict[str, Any] = {"intent": intent}
+        if intent == "clarify":
+            updates["clarification_message"] = "请补充你想了解的具体医学影像问题或 PET-CT 检查信息。"
+        return updates
 
     @staticmethod
     def _route_by_intent(state: AgentState) -> Intent:
@@ -223,7 +231,7 @@ class MedicalImagingAgent:
     @staticmethod
     def _clarification_node(state: AgentState) -> dict[str, Any]:
         logger.info("进入节点：clarification")
-        return {"intent": "clarification", "final_answer": state["clarification_message"]}
+        return {"intent": "clarify", "final_answer": state["clarification_message"]}
 
     @staticmethod
     def _unsupported_node(state: AgentState) -> dict[str, str]:

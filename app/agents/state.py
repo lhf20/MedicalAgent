@@ -3,7 +3,7 @@
 from typing import Any, Literal, TypedDict
 
 
-Intent = Literal["medical_qa", "petct_result_query", "general_chat", "unsupported", "clarification"]
+Intent = Literal["medical_qa", "petct_query", "general_chat", "unsupported", "clarify"]
 
 
 class ConversationTurn(TypedDict):
