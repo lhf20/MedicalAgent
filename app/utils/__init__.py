@@ -1,1 +1,1 @@
-"""Utility layer placeholder."""
+"""Shared application utilities."""

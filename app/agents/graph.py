@@ -2,11 +2,13 @@
 
 import logging
 import json
+import re
 from typing import Any, Literal, Protocol
 
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.intent_router import classify_intent
+from app.agents.context_manager import resolve_query, trim_history
 from app.agents.state import AgentState, Intent
 from app.rag.workflow import RAGResponse, RAGRetrieval
 from app.rag.siliconflow import SiliconFlowClient
@@ -31,9 +33,11 @@ class MedicalImagingAgent:
         self.rag_workflow = rag_workflow
         self.llm_client = llm_client
         self.graph = self._build_graph()
+        self._conversation_state = self._empty_conversation_state()
 
     def _build_graph(self):
         graph = StateGraph(AgentState)
+        graph.add_node("context_resolver", self._context_resolver_node)
         graph.add_node("intent_router", self._intent_router_node)
         graph.add_node("medical_qa", self._medical_qa_node)
         graph.add_node("petct_result_query", self._petct_result_query_node)
@@ -41,7 +45,14 @@ class MedicalImagingAgent:
         graph.add_node("petct_tool_rag", self._petct_tool_rag_node)
         graph.add_node("general_chat", self._general_chat_node)
         graph.add_node("unsupported", self._unsupported_node)
-        graph.add_edge(START, "intent_router")
+        graph.add_node("clarification", self._clarification_node)
+        graph.add_node("save_context", self._save_context_node)
+        graph.add_edge(START, "context_resolver")
+        graph.add_conditional_edges(
+            "context_resolver",
+            self._route_context_resolution,
+            {"continue": "intent_router", "clarify": "clarification"},
+        )
         graph.add_conditional_edges(
             "intent_router",
             self._route_by_intent,
@@ -52,22 +63,39 @@ class MedicalImagingAgent:
                 "unsupported": "unsupported",
             },
         )
-        graph.add_edge("medical_qa", END)
+        graph.add_edge("medical_qa", "save_context")
         graph.add_conditional_edges(
             "petct_result_query",
             self._route_petct_follow_up,
             {"tool_answer": "petct_tool_answer", "tool_rag": "petct_tool_rag"},
         )
-        graph.add_edge("petct_tool_answer", END)
-        graph.add_edge("petct_tool_rag", END)
-        graph.add_edge("general_chat", END)
-        graph.add_edge("unsupported", END)
+        graph.add_edge("petct_tool_answer", "save_context")
+        graph.add_edge("petct_tool_rag", "save_context")
+        graph.add_edge("general_chat", "save_context")
+        graph.add_edge("unsupported", "save_context")
+        graph.add_edge("clarification", "save_context")
+        graph.add_edge("save_context", END)
         return graph.compile()
 
+    def _context_resolver_node(self, state: AgentState) -> dict[str, Any]:
+        resolution = resolve_query(state["user_query"], state)
+        logger.info("上下文补全：clarification_needed=%s", bool(resolution.clarification))
+        return {
+            "resolved_query": resolution.query,
+            "clarification_needed": bool(resolution.clarification),
+            "clarification_message": resolution.clarification,
+        }
+
+    @staticmethod
+    def _route_context_resolution(state: AgentState) -> Literal["continue", "clarify"]:
+        return "clarify" if state["clarification_needed"] else "continue"
+
     def _intent_router_node(self, state: AgentState) -> dict[str, Intent]:
-        query = state["user_query"]
+        query = state["resolved_query"]
         intent = classify_intent(query)
-        logger.info("当前 query：%s", query)
+        logger.info("当前 query：%s", state["user_query"])
+        if query != state["user_query"]:
+            logger.info("上下文补全后的 query：%s", query)
         logger.info("识别 intent：%s", intent)
         return {"intent": intent}
 
@@ -77,13 +105,13 @@ class MedicalImagingAgent:
 
     def _medical_qa_node(self, state: AgentState) -> dict[str, str]:
         logger.info("进入节点：medical_qa")
-        response = self.rag_workflow.answer(state["user_query"])
+        response = self.rag_workflow.answer(state["resolved_query"])
         return {"retrieved_context": response.context, "final_answer": response.answer}
 
     def _petct_result_query_node(self, state: AgentState) -> dict[str, Any]:
         """Extract natural-language parameters and call the existing PET-CT Tool."""
         logger.info("进入节点：petct_result_query")
-        query = state["user_query"]
+        query = state["resolved_query"]
         try:
             parameters = self.llm_client.extract_petct_parameters(query)
         except RuntimeError as error:
@@ -93,6 +121,16 @@ class MedicalImagingAgent:
         study_id = parameters.get("study_id")
         location = parameters.get("location")
         lesion_id = parameters.get("lesion_id")
+        explicit_study_match = re.search(r"PETCT-DEMO-\d+", query, re.IGNORECASE)
+        if not study_id and explicit_study_match:
+            study_id = explicit_study_match.group(0).upper()
+        if not study_id:
+            study_id = state["last_study_id"]
+        same_study = bool(study_id and study_id == state["last_study_id"])
+        if not location and same_study:
+            location = state["last_location"]
+        if not lesion_id and same_study and location == state["last_location"]:
+            lesion_id = state["last_lesion_id"]
         if not isinstance(study_id, str) or not study_id.strip() or not isinstance(location, str) or not location.strip():
             logger.info("PET-CT Tool 未调用：缺少必要参数")
             return {"needs_rag": False, "final_answer": "请提供 PET-CT 的 study_id 和 location 后再查询。"}
@@ -135,7 +173,7 @@ class MedicalImagingAgent:
         if not tool_result or tool_result.get("found") is not True:
             reason = tool_result.get("error", "unknown_error") if tool_result else "tool_not_called"
             return {"final_answer": f"PET-CT 结果查询失败：{reason}。未返回任何医学结果。"}
-        query = state["user_query"]
+        query = state["resolved_query"]
         tool_context = json.dumps(tool_result, ensure_ascii=False)
         try:
             answer = self.llm_client.answer_petct_result(query, tool_result)
@@ -155,7 +193,7 @@ class MedicalImagingAgent:
             return {"final_answer": state["final_answer"] or "PET-CT Tool 未返回可用结果。"}
         logger.info("PET-CT 联合推理：调用 RAG")
         try:
-            retrieval = self.rag_workflow.retrieve(state["user_query"])
+            retrieval = self.rag_workflow.retrieve(state["resolved_query"])
             rag_context = retrieval.context
             rag_count = retrieval.chunk_count
         except RuntimeError as error:
@@ -168,7 +206,7 @@ class MedicalImagingAgent:
             f"RAG Context（一般医学知识）：\n{rag_context or '无足够相关知识片段'}"
         )
         try:
-            answer = self.llm_client.answer_petct_with_rag(state["user_query"], tool_result, rag_context)
+            answer = self.llm_client.answer_petct_with_rag(state["resolved_query"], tool_result, rag_context)
         except RuntimeError as error:
             logger.warning("PET-CT 联合推理回答生成失败：%s", error)
             if tool_result.get("found") is True:
@@ -183,21 +221,74 @@ class MedicalImagingAgent:
         return {"final_answer": self.llm_client.chat(state["user_query"])}
 
     @staticmethod
+    def _clarification_node(state: AgentState) -> dict[str, Any]:
+        logger.info("进入节点：clarification")
+        return {"intent": "clarification", "final_answer": state["clarification_message"]}
+
+    @staticmethod
     def _unsupported_node(state: AgentState) -> dict[str, str]:
         logger.info("进入节点：unsupported")
         return {
             "final_answer": "抱歉，我目前仅支持医学影像知识问答和简单的普通聊天，无法处理该问题。"
         }
 
+    @staticmethod
+    def _save_context_node(state: AgentState) -> dict[str, Any]:
+        history = trim_history(
+            state["conversation_history"]
+            + [{"user": state["user_query"], "assistant": state["final_answer"]}]
+        )
+        updates: dict[str, Any] = {"conversation_history": history}
+        tool_result = state["tool_result"]
+        if tool_result and tool_result.get("found") is True:
+            updates["last_petct_result"] = tool_result
+            updates["last_study_id"] = tool_result.get("study_id")
+            updates["last_location"] = tool_result.get("location")
+            results = tool_result.get("results", [])
+            updates["last_lesion_id"] = (
+                results[0].get("lesion_id") if isinstance(results, list) and len(results) == 1 else None
+            )
+
+        normalized_query = state["resolved_query"].lower()
+        if "suvmax" in normalized_query or "suv_max" in normalized_query or "suv" in normalized_query:
+            updates["last_medical_metric"] = "SUVmax"
+        elif "体积" in normalized_query or "volume" in normalized_query:
+            updates["last_medical_metric"] = "病灶体积"
+        logger.info("对话上下文已更新：保留 %d 轮", len(history))
+        return updates
+
+    @staticmethod
+    def _empty_conversation_state() -> dict[str, Any]:
+        return {
+            "conversation_history": [],
+            "last_petct_result": None,
+            "last_study_id": None,
+            "last_lesion_id": None,
+            "last_location": None,
+            "last_medical_metric": None,
+        }
+
     def invoke(self, query: str) -> AgentState:
-        """Run one graph invocation with a clean initial state."""
-        return self.graph.invoke(
+        """Run one turn and retain only bounded, structured conversation context."""
+        state = self.graph.invoke(
             {
+                **self._conversation_state,
                 "user_query": query,
+                "resolved_query": query,
                 "intent": "unsupported",
                 "tool_result": None,
                 "needs_rag": False,
                 "retrieved_context": "",
                 "final_answer": "",
+                "clarification_needed": False,
+                "clarification_message": "",
             }
         )
+        self._conversation_state = {
+            key: state[key] for key in self._empty_conversation_state()
+        }
+        return state
+
+    def reset_conversation(self) -> None:
+        """Clear the in-process conversation context for a new session."""
+        self._conversation_state = self._empty_conversation_state()
